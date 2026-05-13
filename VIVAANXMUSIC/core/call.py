@@ -62,6 +62,11 @@ def dynamic_media_stream(path: str, video: bool = False, ffmpeg_params: str = No
         ffmpeg_parameters=ffmpeg_params,
     )
 
+
+def is_groupcall_invalid(err: Exception) -> bool:
+    return type(err).__name__ == "GroupcallInvalid" or "GROUPCALL_INVALID" in str(err)
+
+
 async def _clear_(chat_id: int) -> None:
     popped = db.pop(chat_id, None)
     if popped:
@@ -355,6 +360,14 @@ class Call:
                         chat_id,
                     )
                     await asyncio.sleep(1)
+                except Exception as err:
+                    if not is_groupcall_invalid(err) or attempt == 1:
+                        raise
+                    LOGGER(__name__).warning(
+                        "Retrying stream play for chat %s after Telegram returned GROUPCALL_INVALID.",
+                        chat_id,
+                    )
+                    await asyncio.sleep(1)
 
 
     @capture_internal_err
@@ -522,6 +535,8 @@ class Call:
         except TelegramServerError:
             raise AssistantErr(_["call_10"])
         except Exception as e:
+            if is_groupcall_invalid(e):
+                raise AssistantErr(_["call_8"])
             raise AssistantErr(
                 f"ᴜɴᴀʙʟᴇ ᴛᴏ ᴊᴏɪɴ ᴛʜᴇ ɢʀᴏᴜᴘ ᴄᴀʟʟ.\nRᴇᴀsᴏɴ: {e}"
             )
