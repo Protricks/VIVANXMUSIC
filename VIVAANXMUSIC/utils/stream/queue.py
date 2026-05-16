@@ -1,10 +1,14 @@
 import asyncio
+from os import getenv
 from typing import Union
 
+import config
 from VIVAANXMUSIC.misc import db
 from VIVAANXMUSIC.utils.exceptions import AssistantErr
 from VIVAANXMUSIC.utils.formatters import check_duration, seconds_to_min
-from config import QUEUE_LIMIT, autoclean, time_to_seconds
+from config import autoclean, time_to_seconds
+
+QUEUE_LIMIT = int(getattr(config, "QUEUE_LIMIT", getenv("QUEUE_LIMIT", "10")))
 
 
 def _queue_limit_error() -> AssistantErr:

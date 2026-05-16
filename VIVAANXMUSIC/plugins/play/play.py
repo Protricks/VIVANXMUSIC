@@ -1,6 +1,7 @@
 import asyncio
 import random
 import string
+from os import getenv
 
 from pyrogram import filters
 from pyrogram.errors import FloodWait, RandomIdDuplicate
@@ -27,6 +28,14 @@ from VIVAANXMUSIC.utils.inline import (
 from VIVAANXMUSIC.utils.logger import play_logs
 from VIVAANXMUSIC.utils.stream.stream import stream
 from VIVAANXMUSIC.utils.url_guard import is_safe_media_url
+
+PLAYLIST_FETCH_LIMIT = int(
+    getattr(
+        config,
+        "PLAYLIST_FETCH_LIMIT",
+        getenv("PLAYLIST_FETCH_LIMIT", str(getattr(config, "QUEUE_LIMIT", 10))),
+    )
+)
 
 
 @app.on_message(
@@ -204,7 +213,7 @@ async def play_command(
             if "playlist" in url:
                 try:
                     details = await YouTube.playlist(
-                        url, config.PLAYLIST_FETCH_LIMIT, user_id
+                        url, PLAYLIST_FETCH_LIMIT, user_id
                     )
                 except Exception:
                     return await mystic.edit_text(_["play_3"])
@@ -659,7 +668,7 @@ async def play_playlists_command(client, CallbackQuery, _):
             spotify = False
             result = await YouTube.playlist(
                 "",
-                config.PLAYLIST_FETCH_LIMIT,
+                PLAYLIST_FETCH_LIMIT,
                 CallbackQuery.from_user.id,
                 videoid=videoid,
             )

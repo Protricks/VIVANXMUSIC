@@ -16,6 +16,15 @@ from VIVAANXMUSIC.utils.stream.cards import schedule_stream_card
 from VIVAANXMUSIC.utils.stream.queue import put_queue, put_queue_index
 from VIVAANXMUSIC.utils.errors import capture_internal_err
 
+QUEUE_LIMIT = int(getattr(config, "QUEUE_LIMIT", os.getenv("QUEUE_LIMIT", "10")))
+PLAYLIST_FETCH_LIMIT = int(
+    getattr(
+        config,
+        "PLAYLIST_FETCH_LIMIT",
+        os.getenv("PLAYLIST_FETCH_LIMIT", str(QUEUE_LIMIT)),
+    )
+)
+
 
 async def _join_youtube_with_fallback(
     chat_id,
@@ -85,12 +94,12 @@ async def stream(
         msg = f"{_['play_19']}\n\n"
         count = 0
         position = 0
-        queue_was_full = len(db.get(chat_id) or []) >= config.QUEUE_LIMIT
+        queue_was_full = len(db.get(chat_id) or []) >= QUEUE_LIMIT
 
         for search in result:
-            if count >= config.PLAYLIST_FETCH_LIMIT:
+            if count >= PLAYLIST_FETCH_LIMIT:
                 break
-            if len(db.get(chat_id) or []) >= config.QUEUE_LIMIT:
+            if len(db.get(chat_id) or []) >= QUEUE_LIMIT:
                 break
             try:
                 title, duration_min, duration_sec, thumbnail, vidid = await YouTube.details(
@@ -173,7 +182,7 @@ async def stream(
         if count == 0:
             if queue_was_full:
                 raise AssistantErr(
-                    f"Queue limit reached. Only {config.QUEUE_LIMIT} tracks are allowed per chat."
+                    f"Queue limit reached. Only {QUEUE_LIMIT} tracks are allowed per chat."
                 )
             return
         link = await VIVAANBIN(msg)
