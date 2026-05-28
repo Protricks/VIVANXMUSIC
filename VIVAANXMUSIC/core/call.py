@@ -627,6 +627,64 @@ class Call:
         )
         return True
 
+    async def _stop_if_queue_empty(
+        self,
+        client,
+        chat_id: int,
+        finished_track=None,
+        allow_autoplay: bool = True,
+    ) -> bool:
+        if db.get(chat_id):
+            return False
+
+        if (
+            allow_autoplay
+            and finished_track
+            and await self._enqueue_autoplay_track(chat_id, finished_track)
+        ):
+            return False
+
+        await _clear_(chat_id)
+        if chat_id in self.active_calls:
+            try:
+                await client.leave_call(chat_id)
+            except NoActiveGroupCall:
+                pass
+            except Exception:
+                pass
+            finally:
+                self.active_calls.discard(chat_id)
+        return True
+
+    async def _discard_unplayable_queue_head(
+        self,
+        client,
+        chat_id: int,
+        reason: str,
+    ) -> bool:
+        queue = db.get(chat_id)
+        dropped = None
+        if queue:
+            try:
+                dropped = queue.pop(0)
+            except IndexError:
+                dropped = None
+        if dropped:
+            await auto_clean(dropped)
+
+        LOGGER(__name__).warning(
+            "Skipping unplayable queued track for chat %s [%s]: %s",
+            chat_id,
+            (dropped or {}).get("vidid") or (dropped or {}).get("title") or "unknown",
+            reason,
+        )
+        return await self._stop_if_queue_empty(
+            client,
+            chat_id,
+            dropped,
+            allow_autoplay=False,
+        )
+
 
     @capture_internal_err
     async def play(self, client, chat_id: int) -> None:
@@ -640,52 +698,75 @@ class Call:
                 loop = loop - 1
                 await set_loop(chat_id, loop)
             await auto_clean(popped)
-            if not check:
-                if await self._enqueue_autoplay_track(chat_id, popped):
-                    check = db.get(chat_id)
-                if not check:
-                    await _clear_(chat_id)
-                    if chat_id in self.active_calls:
-                        try:
-                            await client.leave_call(chat_id)
-                        except NoActiveGroupCall:
-                            pass
-                        except Exception:
-                            pass
-                        finally:
-                            self.active_calls.discard(chat_id)
-                    return
+            if await self._stop_if_queue_empty(client, chat_id, popped):
+                return
         except:
             try:
                 await _clear_(chat_id)
                 return await client.leave_call(chat_id)
             except:
                 return
-        else:
-            queued = check[0]["file"]
+        while True:
+            check = db.get(chat_id)
+            if not check:
+                await self._stop_if_queue_empty(
+                    client,
+                    chat_id,
+                    allow_autoplay=False,
+                )
+                return
+
+            current = check[0]
+            if not isinstance(current, dict):
+                if await self._discard_unplayable_queue_head(
+                    client,
+                    chat_id,
+                    "malformed queue item",
+                ):
+                    return
+                continue
+
+            queued = current.get("file")
             language = await get_lang(chat_id)
             _ = get_string(language)
-            title = (check[0]["title"]).title()
-            user = check[0]["by"]
-            requester_id = check[0].get("user_id")
-            original_chat_id = check[0]["chat_id"]
-            streamtype = check[0]["streamtype"]
-            videoid = check[0]["vidid"]
+            title = str(current.get("title") or "Unknown Title").title()
+            user = current.get("by") or "Unknown"
+            requester_id = current.get("user_id")
+            original_chat_id = current.get("chat_id", chat_id)
+            streamtype = current.get("streamtype") or "audio"
+            videoid = current.get("vidid")
             db[chat_id][0]["played"] = 0
 
-            exis = (check[0]).get("old_dur")
+            exis = current.get("old_dur")
             if exis:
                 db[chat_id][0]["dur"] = exis
-                db[chat_id][0]["seconds"] = check[0]["old_second"]
+                db[chat_id][0]["seconds"] = current.get("old_second", 0)
                 db[chat_id][0]["speed_path"] = None
                 db[chat_id][0]["speed"] = 1.0
 
             video = True if str(streamtype) == "video" else False
+            if not queued or not isinstance(queued, str):
+                if await self._discard_unplayable_queue_head(
+                    client,
+                    chat_id,
+                    "missing queued stream path",
+                ):
+                    return
+                continue
 
             if "live_" in queued:
-                n, link = await YouTube.video(videoid, True)
-                if n == 0:
-                    return await app.send_message(original_chat_id, text=_["call_6"])
+                try:
+                    n, link = await YouTube.video(videoid, True)
+                except Exception:
+                    n, link = 0, None
+                if n == 0 or not link:
+                    if await self._discard_unplayable_queue_head(
+                        client,
+                        chat_id,
+                        "live stream URL was unavailable",
+                    ):
+                        return
+                    continue
 
                 stream = dynamic_media_stream(path=link, video=video)
                 try:
@@ -702,15 +783,18 @@ class Call:
                     caption=_["stream_1"].format(
                         f"https://t.me/{app.username}?start=info_{videoid}",
                         title[:23],
-                        check[0]["dur"],
+                        current.get("dur"),
                         user,
                     ),
                     button=button,
                     markup="tg",
                 )
+                return
 
             elif "vid_" in queued:
                 mystic = await app.send_message(original_chat_id, _["call_7"])
+                direct = False
+                used_fallback = False
                 try:
                     file_path, direct = await YouTube.download(
                         videoid,
@@ -719,16 +803,39 @@ class Call:
                         video=True if str(streamtype) == "video" else False,
                         stream=True,
                     )
-                except:
-                    return await mystic.edit_text(
-                        _["call_6"], disable_web_page_preview=True
-                    )
+                except Exception:
+                    file_path, direct = None, False
+
+                if not file_path and not direct:
+                    try:
+                        file_path, direct = await YouTube.download(
+                            videoid,
+                            mystic,
+                            videoid=True,
+                            video=True if str(streamtype) == "video" else False,
+                        )
+                        used_fallback = True
+                    except Exception:
+                        file_path, direct = None, False
+
+                if not file_path:
+                    try:
+                        await mystic.edit_text(_["call_6"], disable_web_page_preview=True)
+                    except Exception:
+                        pass
+                    if await self._discard_unplayable_queue_head(
+                        client,
+                        chat_id,
+                        "YouTube download returned no playable stream path",
+                    ):
+                        return
+                    continue
 
                 stream = dynamic_media_stream(path=file_path, video=video)
                 try:
                     await self._play_stream(client, chat_id, stream)
                 except:
-                    if direct:
+                    if direct or used_fallback:
                         return await app.send_message(original_chat_id, text=_["call_6"])
                     try:
                         fallback_path, fallback_direct = await YouTube.download(
@@ -737,14 +844,20 @@ class Call:
                             videoid=True,
                             video=True if str(streamtype) == "video" else False,
                         )
-                    except:
-                        return await mystic.edit_text(
-                            _["call_6"], disable_web_page_preview=True
-                        )
+                    except Exception:
+                        fallback_path, fallback_direct = None, False
                     if not fallback_path:
-                        return await mystic.edit_text(
-                            _["call_6"], disable_web_page_preview=True
-                        )
+                        try:
+                            await mystic.edit_text(_["call_6"], disable_web_page_preview=True)
+                        except Exception:
+                            pass
+                        if await self._discard_unplayable_queue_head(
+                            client,
+                            chat_id,
+                            "fallback YouTube download returned no playable stream path",
+                        ):
+                            return
+                        continue
                     file_path, direct = fallback_path, fallback_direct
                     stream = dynamic_media_stream(path=file_path, video=video)
                     try:
@@ -762,14 +875,23 @@ class Call:
                     caption=_["stream_1"].format(
                         f"https://t.me/{app.username}?start=info_{videoid}",
                         title[:23],
-                        check[0]["dur"],
+                        current.get("dur"),
                         user,
                     ),
                     button=button,
                     markup="stream",
                 )
+                return
 
             elif "index_" in queued:
+                if not videoid:
+                    if await self._discard_unplayable_queue_head(
+                        client,
+                        chat_id,
+                        "index stream URL was missing",
+                    ):
+                        return
+                    continue
                 stream = dynamic_media_stream(path=videoid, video=video)
                 try:
                     await self._play_stream(client, chat_id, stream)
@@ -785,6 +907,7 @@ class Call:
                 )
                 db[chat_id][0]["mystic"] = run
                 db[chat_id][0]["markup"] = "tg"
+                return
 
             else:
                 stream = dynamic_media_stream(path=queued, video=video)
@@ -803,7 +926,7 @@ class Call:
                             else config.TELEGRAM_VIDEO_URL
                         ),
                         caption=_["stream_1"].format(
-                            config.SUPPORT_CHAT, title[:23], check[0]["dur"], user
+                            config.SUPPORT_CHAT, title[:23], current.get("dur"), user
                         ),
                         reply_markup=InlineKeyboardMarkup(button),
                     )
@@ -816,7 +939,7 @@ class Call:
                         chat_id=original_chat_id,
                         photo=config.SOUNCLOUD_IMG_URL,
                         caption=_["stream_1"].format(
-                            config.SUPPORT_CHAT, title[:23], check[0]["dur"], user
+                            config.SUPPORT_CHAT, title[:23], current.get("dur"), user
                         ),
                         reply_markup=InlineKeyboardMarkup(button),
                     )
@@ -833,12 +956,13 @@ class Call:
                         caption=_["stream_1"].format(
                             f"https://t.me/{app.username}?start=info_{videoid}",
                             title[:23],
-                            check[0]["dur"],
+                            current.get("dur"),
                             user,
                         ),
                         button=button,
                         markup="stream",
                     )
+                return
 
 
     async def start(self) -> None:
@@ -900,6 +1024,12 @@ class Call:
                         assistant = await group_assistant(self, update.chat_id)
                         await self.play(assistant, update.chat_id)
 
+            except AssistantErr as err:
+                LOGGER(__name__).warning(
+                    "Stream update skipped for chat %s: %s",
+                    getattr(update, "chat_id", "unknown"),
+                    err,
+                )
             except Exception:
                 import sys, traceback
                 exc_type, exc_obj, exc_tb = sys.exc_info()
