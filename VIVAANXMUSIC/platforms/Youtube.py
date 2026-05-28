@@ -23,7 +23,7 @@ from VIVAANXMUSIC.utils.database import is_on_off
 from VIVAANXMUSIC.utils.formatters import time_to_seconds
 from VIVAANXMUSIC.utils.url_guard import is_safe_media_url
 from VIVAANXMUSIC.security import build_subprocess_env
-from config import DURATION_LIMIT, YT_API_KEY, YTPROXY_URL as YTPROXY
+from config import DURATION_LIMIT, YT_API_KEY, YTPROXY_URL
 
 logger = LOGGER(__name__)
 
@@ -31,8 +31,10 @@ logger = LOGGER(__name__)
 WORKER_FALLBACK_API_URL = os.getenv(
     "WORKER_FALLBACK_API_URL",
     "https://youtubenewapi.skybotsdeveloper.workers.dev",
-)
-WORKER_FALLBACK_API_KEY = os.getenv("WORKER_FALLBACK_API_KEY", "itsmesid")
+).strip()
+WORKER_FALLBACK_API_KEY = os.getenv("WORKER_FALLBACK_API_KEY", "itsmesid").strip()
+YTPROXY = (YTPROXY_URL or "").strip().rstrip("/")
+YT_API_KEY = (YT_API_KEY or "").strip()
 MIN_CACHED_MEDIA_BYTES = 128 * 1024
 
 def build_yt_dlp_args(args: list[str]) -> list[str]:
@@ -694,12 +696,18 @@ class YouTubeAPI:
             return None
 
         def log_primary_api_issue(media_type, message):
-            fallback_note = (
-                "Trying worker fallback."
-                if WORKER_FALLBACK_API_URL and WORKER_FALLBACK_API_KEY
-                else "Worker fallback is not configured."
+            if WORKER_FALLBACK_API_URL and WORKER_FALLBACK_API_KEY:
+                logger.info(
+                    "Primary paid %s API unavailable: %s Trying worker fallback.",
+                    media_type,
+                    message,
+                )
+                return
+            logger.warning(
+                "Primary paid %s API unavailable: %s Worker fallback is not configured.",
+                media_type,
+                message,
             )
-            logger.warning("Primary paid %s API unavailable: %s %s", media_type, message, fallback_note)
 
         def fetch_worker_fallback_link_sync(vid_id, media_format):
             if not WORKER_FALLBACK_API_URL or not WORKER_FALLBACK_API_KEY:
