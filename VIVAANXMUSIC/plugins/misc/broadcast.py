@@ -1,4 +1,5 @@
 import asyncio
+import re
 from html import escape
 from io import BytesIO
 
@@ -7,7 +8,7 @@ from pyrogram.enums import ChatMemberStatus, ChatMembersFilter, ChatType
 from pyrogram.errors import FloodWait
 
 from VIVAANXMUSIC import app
-from VIVAANXMUSIC.misc import SUDOERS
+from VIVAANXMUSIC.misc import SUDOERS, mongodb
 from VIVAANXMUSIC.utils.database import (
     add_served_chat,
     add_served_user,
@@ -21,7 +22,7 @@ from VIVAANXMUSIC.utils.database import (
 )
 from VIVAANXMUSIC.utils.decorators.language import language
 from VIVAANXMUSIC.utils.formatters import alpha_to_int
-from config import OWNER_ID, adminlist
+from config import LOGGER_ID, OWNER_ID, adminlist
 
 IS_BROADCASTING = False
 SCAN_CHAT_TYPES = {ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL}
@@ -36,6 +37,11 @@ if getattr(ChatMemberStatus, "RESTRICTED", None):
     ACTIVE_BOT_STATUSES.add(ChatMemberStatus.RESTRICTED)
 TRACKED_CHAT_IDS = set()
 TRACKED_USER_IDS = set()
+CHAT_ID_RE = re.compile(r"(?<!\d)-(?:100)?\d{7,}(?!\d)")
+CHAT_ID_KEYS = {"chat_id", "chat_id_toggle", "channel_id", "cid"}
+USER_ID_KEYS = {"user_id", "uid", "user1", "user2", "from_user_id", "added_by"}
+USER_LIST_KEYS = {"sudoers"}
+MONGO_SYNC_SKIP_COLLECTIONS = {"blacklistChat", "blockedusers", "gban"}
 
 
 def _chat_title(chat):
@@ -74,6 +80,190 @@ async def _remember_private_user(user):
         return
     await add_served_user(user_id)
     TRACKED_USER_IDS.add(user_id)
+
+
+def _history_scan_limit(command_text):
+    parts = command_text.split()
+    for flag in ("-logs", "-limit"):
+        if flag not in parts:
+            continue
+        try:
+            value = int(parts[parts.index(flag) + 1])
+        except (IndexError, ValueError):
+            continue
+        return max(100, min(value, 50000))
+    return 10000
+
+
+def _extract_chat_ids(text):
+    if not text:
+        return set()
+    return {
+        int(match.group(0))
+        for match in CHAT_ID_RE.finditer(text)
+        if int(match.group(0)) != LOGGER_ID
+    }
+
+
+def _to_int(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if value.lstrip("-").isdigit():
+            return int(value)
+    return None
+
+
+def _iter_int_values(value):
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            int_value = _to_int(item)
+            if int_value is not None:
+                yield int_value
+        return
+
+    int_value = _to_int(value)
+    if int_value is not None:
+        yield int_value
+
+
+def _collect_ids_from_document(document, chat_ids, user_ids):
+    if not isinstance(document, dict):
+        return
+
+    for key, value in document.items():
+        key_name = str(key)
+        key_lower = key_name.lower()
+
+        if key_lower in CHAT_ID_KEYS:
+            for chat_id in _iter_int_values(value):
+                if chat_id < 0:
+                    chat_ids.add(chat_id)
+                elif chat_id > 0:
+                    user_ids.add(chat_id)
+            continue
+
+        if key_lower == "_id":
+            int_id = _to_int(value)
+            if int_id is not None and int_id < 0:
+                chat_ids.add(int_id)
+            continue
+
+        if key_lower in USER_ID_KEYS or key_lower in USER_LIST_KEYS:
+            for user_id in _iter_int_values(value):
+                if user_id > 0:
+                    user_ids.add(user_id)
+            continue
+
+        if isinstance(value, dict):
+            _collect_ids_from_document(value, chat_ids, user_ids)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    _collect_ids_from_document(item, chat_ids, user_ids)
+
+
+async def _sync_targets_from_mongo():
+    collection_names = sorted(await mongodb.list_collection_names())
+    existing_chats = {
+        int(chat["chat_id"])
+        for chat in await get_served_chats()
+        if chat.get("chat_id") is not None
+    }
+    existing_users = {
+        int(user["user_id"])
+        for user in await get_served_users()
+        if user.get("user_id") is not None
+    }
+
+    found_chats = set()
+    found_users = set()
+    source_counts = []
+    scanned_docs = 0
+
+    for collection_name in collection_names:
+        if collection_name in MONGO_SYNC_SKIP_COLLECTIONS:
+            continue
+
+        collection_chat_ids = set()
+        collection_user_ids = set()
+        cursor = mongodb[collection_name].find({})
+        async for document in cursor:
+            scanned_docs += 1
+            _collect_ids_from_document(
+                document, collection_chat_ids, collection_user_ids
+            )
+            if scanned_docs % 500 == 0:
+                await asyncio.sleep(0)
+
+        found_chats.update(collection_chat_ids)
+        found_users.update(collection_user_ids)
+        if collection_chat_ids or collection_user_ids:
+            source_counts.append(
+                (
+                    collection_name,
+                    len(collection_chat_ids),
+                    len(collection_user_ids),
+                )
+            )
+
+    new_chats = sorted(found_chats - existing_chats)
+    new_users = sorted(found_users - existing_users)
+
+    for chat_id in new_chats:
+        await mongodb.chats.update_one(
+            {"chat_id": chat_id}, {"$set": {"chat_id": chat_id}}, upsert=True
+        )
+        TRACKED_CHAT_IDS.add(chat_id)
+
+    for user_id in new_users:
+        await mongodb.tgusersdb.update_one(
+            {"user_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True
+        )
+        TRACKED_USER_IDS.add(user_id)
+
+    return {
+        "collections": len(collection_names),
+        "scanned_docs": scanned_docs,
+        "found_chats": len(found_chats),
+        "found_users": len(found_users),
+        "new_chats": len(new_chats),
+        "new_users": len(new_users),
+        "source_counts": source_counts,
+        "skipped_collections": sorted(MONGO_SYNC_SKIP_COLLECTIONS),
+    }
+
+
+async def _recover_chats_from_log_history(client, limit):
+    recovered = []
+    failed = []
+    seen_ids = set()
+    scanned_messages = 0
+
+    async for log_message in client.get_chat_history(LOGGER_ID, limit=limit):
+        scanned_messages += 1
+        text = log_message.text or log_message.caption or ""
+        for chat_id in _extract_chat_ids(text):
+            if chat_id in seen_ids:
+                continue
+            seen_ids.add(chat_id)
+            try:
+                chat = await client.get_chat(chat_id)
+                if not _is_broadcast_chat(chat):
+                    continue
+                await add_served_chat(chat_id)
+                TRACKED_CHAT_IDS.add(chat_id)
+                recovered.append(chat)
+            except FloodWait as fw:
+                await asyncio.sleep(int(fw.value))
+            except Exception as exc:
+                failed.append((chat_id, str(exc)))
+            await asyncio.sleep(0.03)
+
+    return scanned_messages, recovered, failed
 
 
 async def _send_scan_report(message, status, report):
@@ -123,7 +313,42 @@ async def scan_broadcast_chats(client, message):
     command_text = message.text or ""
     clean_stale = "-clean" in command_text
     check_users = clean_stale or "-users" in command_text
-    status = await message.reply_text("Validating Mongo broadcast targets...")
+    recover_from_logs = "-logs" in command_text
+    status = await message.reply_text("Syncing broadcast targets from Vivaan DB...")
+
+    mongo_sync = {
+        "collections": 0,
+        "scanned_docs": 0,
+        "found_chats": 0,
+        "found_users": 0,
+        "new_chats": 0,
+        "new_users": 0,
+        "source_counts": [],
+        "skipped_collections": sorted(MONGO_SYNC_SKIP_COLLECTIONS),
+    }
+    mongo_sync_error = None
+    try:
+        mongo_sync = await _sync_targets_from_mongo()
+    except Exception as exc:
+        mongo_sync_error = str(exc)
+
+    log_messages_scanned = 0
+    log_recovered_chats = []
+    log_failed_chats = []
+    log_scan_error = None
+    if recover_from_logs:
+        try:
+            await status.edit_text("Recovering targets from log history...")
+        except Exception:
+            pass
+        try:
+            log_messages_scanned, log_recovered_chats, log_failed_chats = (
+                await _recover_chats_from_log_history(
+                    client, _history_scan_limit(command_text)
+                )
+            )
+        except Exception as exc:
+            log_scan_error = str(exc)
 
     db_docs = await get_served_chats()
     user_docs = await get_served_users()
@@ -184,8 +409,19 @@ async def scan_broadcast_chats(client, message):
         "BOT BROADCAST TARGET REPORT",
         "",
         "Note: Telegram does not allow bot accounts to fetch full dialog lists.",
-        "This command validates Mongo targets. New chats/users are auto-synced from activity and bot membership updates.",
+        "This command syncs broadcast targets directly from the Vivaan Mongo database.",
         "",
+        f"Mongo collections scanned: {mongo_sync['collections']}",
+        f"Mongo documents scanned: {mongo_sync['scanned_docs']}",
+        f"Chat/channel IDs found in Vivaan DB: {mongo_sync['found_chats']}",
+        f"Private user IDs found in Vivaan DB: {mongo_sync['found_users']}",
+        f"New chat/channel targets imported: {mongo_sync['new_chats']}",
+        f"New private user targets imported: {mongo_sync['new_users']}",
+        f"Skipped deny-list collections: {', '.join(mongo_sync['skipped_collections'])}",
+        f"Log history scan: {'enabled' if recover_from_logs else 'skipped'}",
+        f"Log messages scanned: {log_messages_scanned}",
+        f"Chat/channel targets recovered from logs: {len(log_recovered_chats)}",
+        f"Log chat IDs not reachable: {len(log_failed_chats)}",
         f"Mongo chat/channel targets: {len(db_docs)}",
         f"Mongo private user targets: {len(user_docs)}",
         f"Reachable chat/channel targets: {len(reachable_chats)}",
@@ -202,6 +438,23 @@ async def scan_broadcast_chats(client, message):
         lines.append("Use /syncchats -clean to remove stale/inaccessible targets from Mongo.")
     if not check_users:
         lines.append("Use /syncchats -users to validate private users too.")
+    if mongo_sync_error:
+        lines.extend(["", f"MONGO SYNC ERROR: {escape(mongo_sync_error)}"])
+    if log_scan_error:
+        lines.extend(["", f"LOG HISTORY SCAN ERROR: {escape(log_scan_error)}"])
+
+    if mongo_sync["source_counts"]:
+        lines.extend(["", "MONGO SOURCES"])
+        for collection_name, chat_count, user_count in mongo_sync["source_counts"][:80]:
+            lines.append(f"{collection_name}: chats={chat_count}, users={user_count}")
+        if len(mongo_sync["source_counts"]) > 80:
+            lines.append(f"...and {len(mongo_sync['source_counts']) - 80} more")
+
+    if log_recovered_chats:
+        lines.extend(["", "RECOVERED FROM LOG HISTORY"])
+        lines.extend(_chat_report_line(chat) for chat in log_recovered_chats[:80])
+        if len(log_recovered_chats) > 80:
+            lines.append(f"...and {len(log_recovered_chats) - 80} more")
 
     if stale_chats:
         lines.extend(["", "STALE / INACCESSIBLE CHATS"])
@@ -216,6 +469,13 @@ async def scan_broadcast_chats(client, message):
             lines.append(f"{user_id} | {escape(reason[:160])}")
         if len(stale_users) > 80:
             lines.append(f"...and {len(stale_users) - 80} more")
+
+    if log_failed_chats:
+        lines.extend(["", "LOG CHAT IDS NOT REACHABLE"])
+        for chat_id, reason in log_failed_chats[:80]:
+            lines.append(f"{chat_id} | {escape(reason[:160])}")
+        if len(log_failed_chats) > 80:
+            lines.append(f"...and {len(log_failed_chats) - 80} more")
 
     await _send_scan_report(message, status, "\n".join(lines))
 
