@@ -7,7 +7,7 @@ from typing import Union
 from ntgcalls import TelegramServerError
 from pyrogram import Client
 from pyrogram.enums import ChatType
-from pyrogram.errors import ChatAdminRequired, ChatSendPlainForbidden, ChatWriteForbidden, Forbidden
+from pyrogram.errors import ChatAdminRequired, ChatWriteForbidden, Forbidden
 from pyrogram.handlers import RawUpdateHandler
 from pyrogram.raw.functions.channels import GetFullChannel
 from pyrogram.raw.functions.messages import GetFullChat
@@ -230,7 +230,7 @@ class Call:
                 notify_chat_id,
                 f"Joined VC\nName: {name}{username}\nUser ID: <code>{user_id}</code>",
             )
-        except (ChatWriteForbidden, ChatSendPlainForbidden, Forbidden):
+        except (ChatWriteForbidden, Forbidden):
             LOGGER(__name__).warning(
                 "Disabling VC join notifications for chat %s because the bot cannot send messages there.",
                 notify_chat_id,
@@ -1087,7 +1087,7 @@ class Call:
             try:
                 if isinstance(update, UpdateGroupCallParticipants):
                     await self._handle_group_call_participants_update(update)
-            except (ChatWriteForbidden, ChatSendPlainForbidden, Forbidden) as err:
+            except (ChatWriteForbidden, Forbidden) as err:
                 LOGGER(__name__).warning(
                     "VC notify update ignored because the bot cannot write to the target chat: %s",
                     err,
