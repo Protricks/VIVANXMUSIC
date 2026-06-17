@@ -123,24 +123,18 @@ async def start_pm(client, message: Message, _):
                 await m.edit_text(f"Error: {e}")
             return
 
-    out = private_panel(_)
-    sticker_message = await message.reply_sticker(sticker=random.choice(STICKERS))
-    asyncio.create_task(delete_sticker_after_delay(sticker_message, 2))
+   out = private_panel(_)
+sticker_message = await message.reply_sticker(sticker=random.choice(STICKERS))
+asyncio.create_task(delete_sticker_after_delay(sticker_message, 2))
 
-    served_chats_coro = get_served_chats()
-    served_users_coro = get_served_users()
-    stats_coro = bot_sys_stats()
-    served_chats, served_users, (UP, CPU, RAM, DISK) = await asyncio.gather(
-        served_chats_coro, served_users_coro, stats_coro
-    )
-
-    await message.reply_photo(
-        random.choice(START_VIDS),
-        caption=random.choice(AYUV).format(
-            message.from_user.mention, app.mention, UP, DISK, CPU, RAM, len(served_users), len(served_chats)
-        ),
-        reply_markup=InlineKeyboardMarkup(out),
-    )
+await message.reply_photo(
+    random.choice(START_VIDS),
+    caption=random.choice(AYUV).format(
+        message.from_user.mention, app.mention, config.OWNER_NAME
+    ),
+    reply_markup=InlineKeyboardMarkup(out),
+    has_spoiler=True,
+)
 
     if await is_on_off(2):
         username = f"@{message.from_user.username}" if message.from_user.username else "(none)"
@@ -160,7 +154,7 @@ async def start_gp(client, message: Message, _):
     out = start_panel(_)
     uptime = int(time.time() - _boot_)
     try:
-        await message.reply_video(
+        await message.reply_photo(
             random.choice(START_VIDS),
             caption=_["start_1"].format(app.mention, get_readable_time(uptime)),
             reply_markup=InlineKeyboardMarkup(out),
@@ -200,7 +194,7 @@ async def welcome(client, message: Message):
                     return await app.leave_chat(message.chat.id)
 
                 out = start_panel(_)
-                await message.reply_video(
+                await message.reply_photo(
                     random.choice(START_VIDS),
                     caption=_["start_3"].format(
                         message.from_user.mention,
