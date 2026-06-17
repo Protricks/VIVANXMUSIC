@@ -130,7 +130,7 @@ async def start_pm(client, message: Message, _):
     await message.reply_photo(
         random.choice(START_VIDS),
         caption=random.choice(AYUV).format(
-            message.from_user.mention, app.mention, config.OWNER_NAME
+            message.from_user.mention, app.mention, config.OWNER_USERNAME
         ),
         reply_markup=InlineKeyboardMarkup(out),
         has_spoiler=True,
