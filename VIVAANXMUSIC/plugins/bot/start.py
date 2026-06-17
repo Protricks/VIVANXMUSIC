@@ -1,7 +1,7 @@
 import asyncio
 import random
 import time
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.enums import ChatType
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from youtubesearchpython.future import VideosSearch
@@ -10,14 +10,11 @@ import config
 from VIVAANXMUSIC import app
 from VIVAANXMUSIC.misc import _boot_
 from VIVAANXMUSIC.plugins.sudo.sudoers import sudoers_list
-from VIVAANXMUSIC.utils import bot_sys_stats
 from VIVAANXMUSIC.utils.database import (
     add_served_chat,
     add_served_user,
     blacklisted_chats,
     get_lang,
-    get_served_chats,
-    get_served_users,
     is_banned_user,
     is_on_off,
 )
@@ -134,6 +131,7 @@ async def start_pm(client, message: Message, _):
         ),
         reply_markup=InlineKeyboardMarkup(out),
         has_spoiler=True,
+        parse_mode=enums.ParseMode.HTML,
     )
 
     if await is_on_off(2):
