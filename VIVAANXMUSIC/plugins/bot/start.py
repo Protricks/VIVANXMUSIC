@@ -134,7 +134,7 @@ async def start_pm(client, message: Message, _):
         served_chats_coro, served_users_coro, stats_coro
     )
 
-    await message.reply_video(
+    await message.reply_photo(
         random.choice(START_VIDS),
         caption=random.choice(AYUV).format(
             message.from_user.mention, app.mention, UP, DISK, CPU, RAM, len(served_users), len(served_chats)
